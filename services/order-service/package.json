@@ -7,6 +7,8 @@
     "start": "node app.js"
   },
   "dependencies": {
+    "@grpc/grpc-js": "^1.14.2",
+    "@grpc/proto-loader": "^0.8.0",
     "amqplib": "^0.10.3",
     "consul": "^1.2.0",
     "cors": "^2.8.5",
@@ -15,6 +17,7 @@
     "express-validator": "^7.1.0",
     "helmet": "^7.1.0",
     "jsonwebtoken": "^9.0.2",
+    "opossum": "^9.0.0",
     "swagger-ui-express": "^5.0.0",
     "yamljs": "^0.3.0"
   },

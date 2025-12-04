@@ -2,6 +2,7 @@ const express = require("express");
 const { body } = require("express-validator");
 const { OrderController } = require("../controllers/order.controller");
 const { verifyToken } = require("../middleware/auth.middleware");
+const { breaker } = require("../utils/paymentClient");
 
 const router = express.Router();
 
@@ -29,5 +30,19 @@ router.post(
   ],
   OrderController.createOrder
 );
+
+//Проверка статуса оплаты через gRPC + Circuit Breaker
+router.get("/:id/payment-status", async (req, res) => {
+  try {
+    const orderId = req.params.id;
+    // Вызываем через Breaker
+    const result = await breaker.fire(orderId);
+
+    res.json(result);
+  } catch (error) {
+    console.error("Error fetching payment status:", error);
+    res.status(500).json({ error: "Internal Error" });
+  }
+});
 
 module.exports = router;

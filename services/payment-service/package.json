@@ -6,6 +6,8 @@
     "start": "node app.js"
   },
   "dependencies": {
+    "@grpc/grpc-js": "^1.14.2",
+    "@grpc/proto-loader": "^0.8.0",
     "amqplib": "^0.10.3",
     "dotenv": "^16.4.5"
   }

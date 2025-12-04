@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package payment;
+
+service PaymentService {
+  rpc GetPaymentStatus (PaymentStatusRequest) returns (PaymentStatusResponse);
+}
+
+message PaymentStatusRequest {
+  string orderId = 1;
+}
+
+message PaymentStatusResponse {
+  string status = 1; // "processed", "failed", "pending"
+  string transactionId = 2;
+}

@@ -6,6 +6,9 @@ RUN apk add --no-cache wget
 WORKDIR /usr/src/app
 
 COPY package*.json ./
+
+COPY protos ./protos
+
 RUN npm install
 
 COPY . .

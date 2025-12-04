@@ -55,17 +55,22 @@ services:
       - PORT=3003
       - JWT_SECRET=super-secret-jwt-key-change-in-production
       - RABBITMQ_URL=amqp://rabbitmq # <-- Переменная для подключения к RabbitMQ
+      - PAYMENT_SERVICE_GRPC=payment-service:50051 # <-- Адрес gRPC сервиса платежей
     depends_on:
       rabbitmq: { condition: service_healthy } # <-- Запускается только после RabbitMQ
     networks: [marketplace-net]
     restart: unless-stopped
 
-  # Новый сервис для обработки платежей
+  # Cервис для обработки платежей
   payment-service:
     build: ./services/payment-service
     container_name: payment-service
     environment:
       - RABBITMQ_URL=amqp://rabbitmq
+      - GRPC_PORT=50051
+    ports:
+      # Экспонируем порт, если захотим тестировать локально (опционально)
+      - "50051:50051"
     depends_on:
       rabbitmq: { condition: service_healthy }
     networks: [marketplace-net]
