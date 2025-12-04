@@ -1,0 +1,160 @@
+openapi: 3.0.3
+info:
+  title: Catalog Service API
+  description: Product catalog and wishlist management service
+  version: 1.0.0
+servers:
+  - url: http://localhost:8080/api
+    description: Development server (via NGINX Gateway)
+tags:
+  - name: Products
+    description: Product catalog operations
+  - name: Wishlist
+    description: User wishlist management
+paths:
+  /products:
+    get:
+      tags: [Products]
+      summary: Get all products
+      parameters:
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: limit, in: query, schema: { type: integer, default: 10 } }
+        - { name: size, in: query, schema: { type: string } }
+        - { name: color, in: query, schema: { type: string } }
+        - { name: brand, in: query, schema: { type: string } }
+        - { name: minPrice, in: query, schema: { type: number, format: float } }
+        - { name: maxPrice, in: query, schema: { type: number, format: float } }
+        - {
+            name: sortBy,
+            in: query,
+            schema: { type: string, enum: [name, price, createdAt] },
+          }
+        - {
+            name: order,
+            in: query,
+            schema: { type: string, enum: [asc, desc], default: asc },
+          }
+      responses:
+        "200":
+          description: A paginated list of products
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductListResponse"
+    post:
+      tags: [Products]
+      summary: Create a new product
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProductRequest"
+      responses:
+        "201": { description: "Product created successfully" }
+  /products/{id}:
+    get:
+      tags: [Products]
+      summary: Get product by ID
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: Product details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Product"
+        "404": { description: "Product not found" }
+  /wishlist:
+    get:
+      tags: [Wishlist]
+      summary: Get user wishlist
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: A list of product IDs in the wishlist
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  productIds:
+                    type: array
+                    items: { type: integer }
+    post:
+      tags: [Wishlist]
+      summary: Add product to wishlist
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                productId: { type: integer }
+      responses:
+        "201": { description: "Product added to wishlist" }
+  /wishlist/{productId}:
+    delete:
+      tags: [Wishlist]
+      summary: Remove product from wishlist
+      security:
+        - bearerAuth: []
+      parameters:
+        - {
+            name: productId,
+            in: path,
+            required: true,
+            schema: { type: integer },
+          }
+      responses:
+        "200": { description: "Product removed from wishlist" }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Product:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        description: { type: string }
+        price: { type: number, format: float }
+        size: { type: string }
+        color: { type: string }
+        stock: { type: integer }
+        brand: { type: string }
+        createdAt: { type: string, format: date-time }
+    ProductListResponse:
+      type: object
+      properties:
+        products:
+          type: array
+          items:
+            $ref: "#/components/schemas/Product"
+        pagination:
+          type: object
+          properties:
+            page: { type: integer }
+            limit: { type: integer }
+            totalItems: { type: integer }
+            totalPages: { type: integer }
+    CreateProductRequest:
+      type: object
+      properties:
+        name: { type: string }
+        description: { type: string }
+        price: { type: number, format: float }
+        size: { type: string }
+        color: { type: string }
+        stock: { type: integer }
+        brand: { type: string }

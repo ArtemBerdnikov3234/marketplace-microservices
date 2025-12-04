@@ -1,0 +1,110 @@
+openapi: 3.0.3
+info:
+  title: Auth Service API
+  description: Authentication and user management service for the marketplace
+  version: 1.0.0
+servers:
+  - url: http://localhost:8080/api/auth
+    description: Development server (via NGINX Gateway)
+tags:
+  - name: Authentication
+    description: User authentication operations
+  - name: User Profile
+    description: User profile management
+paths:
+  /register:
+    post:
+      tags: [Authentication]
+      summary: Register a new user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: User registered successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegisterResponse"
+        "400": { description: "Validation error" }
+        "409": { description: "User already exists" }
+  /login:
+    post:
+      tags: [Authentication]
+      summary: Login user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "401": { description: "Invalid credentials" }
+  /profile:
+    get:
+      tags: [User Profile]
+      summary: Get user profile
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: User profile retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfile"
+        "401": { description: "Unauthorized - Invalid or missing token" }
+        "404": { description: "User not found" }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    RegisterRequest:
+      type: object
+      required: [username, email, password]
+      properties:
+        username: { type: string, example: "john_doe" }
+        email: { type: string, format: email, example: "john@example.com" }
+        password:
+          {
+            type: string,
+            minLength: 6,
+            format: password,
+            example: "securePassword123",
+          }
+    RegisterResponse:
+      type: object
+      properties:
+        message: { type: string, example: "User registered successfully" }
+        userId: { type: integer, example: 1 }
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email, example: "john@example.com" }
+        password:
+          { type: string, format: password, example: "securePassword123" }
+    LoginResponse:
+      type: object
+      properties:
+        token:
+          { type: string, example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." }
+    UserProfile:
+      type: object
+      properties:
+        id: { type: integer, example: 1 }
+        username: { type: string, example: "john_doe" }
+        email: { type: string, format: email, example: "john@example.com" }
+        role: { type: string, enum: [buyer, admin], example: "buyer" }

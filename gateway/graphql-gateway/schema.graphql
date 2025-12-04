@@ -1,0 +1,28 @@
+type Query {
+  userOrders: [Order]
+  products(limit: Int): [Product]
+}
+type Order {
+  id: ID!
+  userId: ID!
+  items: [OrderItem]
+  totalAmount: Float
+  status: String
+  createdAt: String
+}
+type OrderItem {
+  productId: ID!
+  quantity: Int
+  price: Float
+  product: Product
+}
+type Product {
+  id: ID!
+  name: String
+  description: String
+  price: Float
+  size: String
+  color: String
+  stock: Int
+  brand: String
+}
