@@ -8,6 +8,7 @@ const {
 const { cancelOrder } = require("./controllers/order.controller");
 const orderRoutes = require("./routes/order.routes");
 const { verifyToken } = require("./middleware/auth.middleware");
+const { connectKafkaProducer } = require("./utils/kafka");
 
 dotenv.config();
 const app = express();
@@ -49,9 +50,8 @@ async function startServer() {
   app.listen(PORT, async () => {
     console.log(`[Order] Service listening on port ${PORT}`);
     try {
-      // Сначала подключаемся к RabbitMQ
       await connectRabbitMQ();
-      // Затем запускаем прослушивание событий
+      await connectKafkaProducer();
       await startSagaListeners();
       console.log(
         "[Order] Application started successfully and listening for events."

@@ -1,26 +1,25 @@
 const { validationResult } = require("express-validator");
 const { getChannel, EXCHANGE_NAME } = require("../utils/rabbitmq");
+const { publishEvent } = require("../utils/kafka"); // <-- Kafka
+const EventStore = require("../models/eventStore"); // <-- Event Sourcing
 
-// Хранилище заказов в памяти
-const orders = new Map();
 let orderIdCounter = 1;
 const ORDER_CREATED_KEY = "order.created";
 
 class OrderController {
-  // Получить все заказы аутентифицированного пользователя
+  // Query: Чтение состояния (восстанавливается из событий)
   async getUserOrders(req, res, next) {
     try {
       const userId = req.user.userId;
-      const userOrders = Array.from(orders.values()).filter(
-        (order) => order.userId === userId
-      );
+      // Используем EventStore для получения актуального состояния
+      const userOrders = EventStore.getAllOrdersForUser(userId);
       res.json({ orders: userOrders });
     } catch (error) {
       next(error);
     }
   }
 
-  // Создать новый заказ и запустить Saga
+  // Command: Создание события
   async createOrder(req, res, next) {
     try {
       const errors = validationResult(req);
@@ -35,33 +34,37 @@ class OrderController {
         0
       );
 
-      const newOrder = {
-        id: orderIdCounter++,
+      const orderId = orderIdCounter++;
+
+      const payload = {
+        id: orderId,
         userId,
         items,
         totalAmount: parseFloat(totalAmount.toFixed(2)),
-        status: "pending", // Начальный статус
         createdAt: new Date().toISOString(),
       };
 
-      orders.set(newOrder.id, newOrder);
+      // 1. Сохраняем событие в Event Store
+      EventStore.save(orderId, "OrderCreated", payload);
 
-      // Публикуем событие в RabbitMQ
+      // 2. Публикуем в Kafka (для аналитики)
+      await publishEvent("OrderCreated", payload);
+
+      // 3. Публикуем в RabbitMQ (для Саги - совместимость с прошлым шагом)
+      // В "чистой" архитектуре Saga тоже могла бы слушать Kafka, но мы оставим Rabbit
       const channel = getChannel();
+      const sagaPayload = { ...payload, status: "pending" }; // Саге нужно поле status
       channel.publish(
         EXCHANGE_NAME,
         ORDER_CREATED_KEY,
-        Buffer.from(JSON.stringify(newOrder))
+        Buffer.from(JSON.stringify(sagaPayload))
       );
 
-      console.log(
-        `[Order] Order ${newOrder.id} created and event "${ORDER_CREATED_KEY}" published.`
-      );
+      console.log(`[Order] Order ${orderId} created (Event Sourced).`);
 
-      // Отвечаем клиенту СРАЗУ (статус 202 Accepted)
       res.status(202).json({
-        message: "Order accepted for processing.",
-        order: newOrder,
+        message: "Order accepted.",
+        order: EventStore.getOrderState(orderId), // Возвращаем восстановленное состояние
       });
     } catch (error) {
       next(error);
@@ -69,14 +72,22 @@ class OrderController {
   }
 }
 
-// Отдельная функция для компенсирующей транзакции
-function cancelOrder(orderId) {
-  const order = orders.get(orderId);
-  if (order && order.status === "pending") {
-    order.status = "cancelled";
-    orders.set(orderId, order);
+// Обновленная функция компенсации (тоже через события)
+async function cancelOrder(orderId) {
+  const currentState = EventStore.getOrderState(orderId);
+
+  if (currentState && currentState.status === "pending") {
+    // 1. Сохраняем событие
+    EventStore.save(orderId, "OrderCancelled", { reason: "Payment Failed" });
+
+    // 2. Публикуем в Kafka
+    await publishEvent("OrderCancelled", {
+      id: orderId,
+      totalAmount: currentState.totalAmount,
+    });
+
     console.log(
-      `[Order] SAGA COMPENSATION: Order ${orderId} has been cancelled due to payment failure.`
+      `[Order] SAGA COMPENSATION: Order ${orderId} cancelled via Event Sourcing.`
     );
   }
 }
