@@ -1,57 +1,10 @@
 // services/catalog-service/controllers/product.controller.js
+const Product = require("../models/product.model");
 const { validationResult } = require("express-validator");
-
-// Хранилище товаров в памяти
-const products = new Map();
-let productIdCounter = 1;
-
-// Начальные данные для демонстрации
-const seedProducts = () => {
-  const sampleProducts = [
-    {
-      id: productIdCounter++,
-      name: "Classic White T-Shirt",
-      description: "Premium cotton t-shirt with comfortable fit",
-      price: 29.99,
-      size: "M",
-      color: "White",
-      stock: 100,
-      brand: "BasicWear",
-      createdAt: new Date().toISOString(),
-    },
-    {
-      id: productIdCounter++,
-      name: "Blue Denim Jeans",
-      description: "Stylish slim-fit jeans for everyday wear",
-      price: 79.99,
-      size: "L",
-      color: "Blue",
-      stock: 50,
-      brand: "DenimPro",
-      createdAt: new Date().toISOString(),
-    },
-    {
-      id: productIdCounter++,
-      name: "Black Leather Jacket",
-      description: "Genuine leather jacket with modern design",
-      price: 199.99,
-      size: "XL",
-      color: "Black",
-      stock: 25,
-      brand: "LeatherLux",
-      createdAt: new Date().toISOString(),
-    },
-  ];
-
-  sampleProducts.forEach((product) => products.set(product.id, product));
-  console.log("Product data seeded.");
-};
-
-seedProducts();
 
 class ProductController {
   /**
-   * Получает список всех товаров с возможностью фильтрации, сортировки и пагинации.
+   * Получает список всех товаров с фильтрацией, сортировкой и пагинацией (MongoDB).
    */
   async getAllProducts(req, res, next) {
     try {
@@ -60,71 +13,55 @@ class ProductController {
         return res.status(400).json({ errors: errors.array() });
       }
 
-      let productList = Array.from(products.values());
+      // --- Фильтрация ---
+      const filter = {};
 
-      // Применяем фильтры из query-параметров
-      const {
-        size,
-        color,
-        minPrice,
-        maxPrice,
-        brand,
-        sortBy,
-        order,
-        page,
-        limit,
-      } = req.query;
-
-      if (size) {
-        productList = productList.filter(
-          (p) => p.size.toLowerCase() === size.toLowerCase()
-        );
-      }
-      if (color) {
-        productList = productList.filter(
-          (p) => p.color.toLowerCase() === color.toLowerCase()
-        );
-      }
-      if (brand) {
-        productList = productList.filter((p) =>
-          p.brand.toLowerCase().includes(brand.toLowerCase())
-        );
-      }
-      if (minPrice) {
-        productList = productList.filter(
-          (p) => p.price >= parseFloat(minPrice)
-        );
-      }
-      if (maxPrice) {
-        productList = productList.filter(
-          (p) => p.price <= parseFloat(maxPrice)
-        );
+      // Поиск по бренду (case-insensitive)
+      if (req.query.brand) {
+        filter.brand = { $regex: req.query.brand, $options: "i" };
       }
 
-      // Применяем сортировку
-      if (sortBy) {
-        const sortOrder = order === "desc" ? -1 : 1;
-        productList.sort((a, b) => {
-          if (a[sortBy] < b[sortBy]) return -1 * sortOrder;
-          if (a[sortBy] > b[sortBy]) return 1 * sortOrder;
-          return 0;
-        });
+      // Точное совпадение
+      if (req.query.size) filter.size = req.query.size;
+      if (req.query.color) filter.color = req.query.color;
+
+      // Диапазон цен
+      if (req.query.minPrice || req.query.maxPrice) {
+        filter.price = {};
+        if (req.query.minPrice)
+          filter.price.$gte = parseFloat(req.query.minPrice);
+        if (req.query.maxPrice)
+          filter.price.$lte = parseFloat(req.query.maxPrice);
       }
 
-      // Применяем пагинацию
-      const pageNum = parseInt(page) || 1;
-      const pageLimit = parseInt(limit) || 10;
-      const startIndex = (pageNum - 1) * pageLimit;
-      const endIndex = startIndex + pageLimit;
-      const paginatedProducts = productList.slice(startIndex, endIndex);
+      // --- Сортировка ---
+      let sort = "-createdAt"; // По умолчанию: сначала новые
+      if (req.query.sortBy) {
+        const order = req.query.order === "desc" ? "-" : "";
+        // В Mongo поле сортировки просто указывается строкой, например "-price" или "name"
+        sort = order + req.query.sortBy;
+      }
+
+      // --- Пагинация ---
+      const page = parseInt(req.query.page, 10) || 1;
+      const limit = parseInt(req.query.limit, 10) || 10;
+      const skip = (page - 1) * limit;
+
+      // --- Выполнение запроса ---
+      const products = await Product.find(filter)
+        .sort(sort)
+        .skip(skip)
+        .limit(limit);
+
+      const totalItems = await Product.countDocuments(filter);
 
       res.json({
-        products: paginatedProducts,
+        products,
         pagination: {
-          page: pageNum,
-          limit: pageLimit,
-          totalItems: productList.length,
-          totalPages: Math.ceil(productList.length / pageLimit),
+          page,
+          limit,
+          totalItems,
+          totalPages: Math.ceil(totalItems / limit),
         },
       });
     } catch (error) {
@@ -133,11 +70,11 @@ class ProductController {
   }
 
   /**
-   * Получает один товар по его ID.
+   * Получает один товар по его ID (MongoDB _id).
    */
   async getProductById(req, res, next) {
     try {
-      const product = products.get(parseInt(req.params.id));
+      const product = await Product.findById(req.params.id);
 
       if (!product) {
         return res.status(404).json({ error: "Product not found" });
@@ -145,6 +82,10 @@ class ProductController {
 
       res.json(product);
     } catch (error) {
+      // Если ID имеет неверный формат MongoDB (не 24 hex chars), это тоже ошибка 404/400
+      if (error.kind === "ObjectId") {
+        return res.status(404).json({ error: "Product not found" });
+      }
       next(error);
     }
   }
@@ -159,25 +100,12 @@ class ProductController {
         return res.status(400).json({ errors: errors.array() });
       }
 
-      const { name, description, price, size, color, stock, brand } = req.body;
-
-      const newProduct = {
-        id: productIdCounter++,
-        name,
-        description,
-        price: parseFloat(price),
-        size,
-        color,
-        stock: parseInt(stock),
-        brand,
-        createdAt: new Date().toISOString(),
-      };
-
-      products.set(newProduct.id, newProduct);
+      // Mongoose модель сама валидирует типы данных
+      const product = await Product.create(req.body);
 
       res.status(201).json({
         message: "Product created successfully",
-        product: newProduct,
+        product,
       });
     } catch (error) {
       next(error);
@@ -194,31 +122,24 @@ class ProductController {
         return res.status(400).json({ errors: errors.array() });
       }
 
-      const productId = parseInt(req.params.id);
-      const product = products.get(productId);
+      const product = await Product.findByIdAndUpdate(
+        req.params.id,
+        req.body,
+        { new: true, runValidators: true }, // Вернуть обновленный документ
+      );
 
       if (!product) {
         return res.status(404).json({ error: "Product not found" });
       }
-
-      const { name, description, price, size, color, stock, brand } = req.body;
-
-      // Обновляем только те поля, которые были переданы в теле запроса
-      if (name) product.name = name;
-      if (description) product.description = description;
-      if (price) product.price = parseFloat(price);
-      if (size) product.size = size;
-      if (color) product.color = color;
-      if (stock !== undefined) product.stock = parseInt(stock);
-      if (brand) product.brand = brand;
-
-      products.set(productId, product);
 
       res.json({
         message: "Product updated successfully",
         product,
       });
     } catch (error) {
+      if (error.kind === "ObjectId") {
+        return res.status(404).json({ error: "Product not found" });
+      }
       next(error);
     }
   }
@@ -228,19 +149,20 @@ class ProductController {
    */
   async deleteProduct(req, res, next) {
     try {
-      const productId = parseInt(req.params.id);
+      const product = await Product.findByIdAndDelete(req.params.id);
 
-      if (!products.has(productId)) {
+      if (!product) {
         return res.status(404).json({ error: "Product not found" });
       }
 
-      products.delete(productId);
-
       res.status(200).json({
         message: "Product deleted successfully",
-        productId,
+        productId: req.params.id,
       });
     } catch (error) {
+      if (error.kind === "ObjectId") {
+        return res.status(404).json({ error: "Product not found" });
+      }
       next(error);
     }
   }

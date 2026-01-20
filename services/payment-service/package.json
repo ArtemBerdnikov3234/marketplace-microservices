@@ -9,6 +9,13 @@
     "@grpc/grpc-js": "^1.14.2",
     "@grpc/proto-loader": "^0.8.0",
     "amqplib": "^0.10.3",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "jaeger-client": "^3.19.0",
+    "opentracing": "^0.14.7",
+    "pg": "^8.17.1",
+    "pg-hstore": "^2.3.4",
+    "prom-client": "^15.1.0",
+    "sequelize": "^6.37.7",
+    "winston": "^3.11.0"
   }
 }

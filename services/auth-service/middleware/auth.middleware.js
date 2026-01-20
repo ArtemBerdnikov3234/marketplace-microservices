@@ -1,9 +1,8 @@
-// services/*/middleware/auth.middleware.js
 const jwt = require("jsonwebtoken");
 
 const verifyToken = (req, res, next) => {
   const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1]; // Bearer TOKEN
+  const token = authHeader && authHeader.split(" ")[1];
 
   if (!token) {
     return res
@@ -20,4 +19,32 @@ const verifyToken = (req, res, next) => {
   return next();
 };
 
-module.exports = { verifyToken };
+const checkRole = (...allowedRoles) => {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({
+        error: "Authentication required",
+      });
+    }
+
+    if (!allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({
+        error: "Access denied. Insufficient permissions.",
+        required: allowedRoles,
+        current: req.user.role,
+      });
+    }
+
+    next();
+  };
+};
+
+const adminOnly = checkRole("admin");
+const userOrAdmin = checkRole("user", "admin");
+
+module.exports = {
+  verifyToken,
+  checkRole,
+  adminOnly,
+  userOrAdmin,
+};

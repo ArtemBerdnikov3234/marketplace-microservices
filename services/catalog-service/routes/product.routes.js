@@ -3,6 +3,8 @@ const express = require("express");
 const { body, query, param } = require("express-validator");
 const productController = require("../controllers/product.controller.js");
 const { verifyToken } = require("../middleware/auth.middleware.js");
+const { adminOnly } = require("../middleware/rbac.middleware.js");
+
 const router = express.Router();
 
 // Публичные роуты (не требуют токен)
@@ -18,14 +20,17 @@ router.get(
       .isInt({ min: 1 })
       .withMessage("Limit must be a positive integer"),
   ],
-  productController.getAllProducts
+  productController.getAllProducts,
 );
-router.get("/:id", [param("id").isInt()], productController.getProductById);
 
-// Защищенные роуты (требуют валидный JWT токен)
+// Убрали .isInt()
+router.get("/:id", productController.getProductById);
+
+// Защищенные роуты (только для администраторов)
 router.post(
   "/",
   verifyToken,
+  adminOnly,
   [
     body("name").notEmpty().withMessage("Name is required"),
     body("price")
@@ -35,21 +40,13 @@ router.post(
       .isInt({ min: 0 })
       .withMessage("Stock must be a non-negative integer"),
   ],
-  productController.createProduct
+  productController.createProduct,
 );
 
-router.put(
-  "/:id",
-  [param("id").isInt()],
-  verifyToken,
-  productController.updateProduct
-);
+// Убрали .isInt()
+router.put("/:id", verifyToken, adminOnly, productController.updateProduct);
 
-router.delete(
-  "/:id",
-  [param("id").isInt()],
-  verifyToken,
-  productController.deleteProduct
-);
+// Убрали .isInt()
+router.delete("/:id", verifyToken, adminOnly, productController.deleteProduct);
 
 module.exports = router;

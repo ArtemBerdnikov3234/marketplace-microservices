@@ -1,94 +1,159 @@
+// services/order-service/controllers/order.controller.js
 const { validationResult } = require("express-validator");
 const { getChannel, EXCHANGE_NAME } = require("../utils/rabbitmq");
-const { publishEvent } = require("../utils/kafka"); // <-- Kafka
-const EventStore = require("../models/eventStore"); // <-- Event Sourcing
+const { publishEvent } = require("../utils/kafka");
+const { Order, OrderItem, sequelize } = require("../models/index");
 
-let orderIdCounter = 1;
+// METRICS
+const {
+  orderProcessingDuration,
+  ordersTotal,
+} = require("../../common/observability");
+
 const ORDER_CREATED_KEY = "order.created";
 
 class OrderController {
-  // Query: Чтение состояния (восстанавливается из событий)
+  // Получить все заказы пользователя
   async getUserOrders(req, res, next) {
+    const span = req.span
+      ? req.tracer.startSpan("get-user-orders", { childOf: req.span.context() })
+      : null;
+
     try {
       const userId = req.user.userId;
-      // Используем EventStore для получения актуального состояния
-      const userOrders = EventStore.getAllOrdersForUser(userId);
+      span?.setTag("user.id", userId);
+
+      const userOrders = await Order.findAll({
+        where: { userId },
+        include: [{ model: OrderItem, as: "items" }], // Подгружаем товары заказа
+        order: [["createdAt", "DESC"]],
+      });
+
+      req.logger.info("Orders retrieved", { userId, count: userOrders.length });
       res.json({ orders: userOrders });
+      span?.finish();
     } catch (error) {
+      span?.setTag("error", true);
+      req.logger.error("Error fetching orders", { error: error.message });
       next(error);
     }
   }
 
-  // Command: Создание события
+  // Создать заказ (Saga Start)
   async createOrder(req, res, next) {
+    const startTime = Date.now();
+    const span = req.span
+      ? req.tracer.startSpan("create-order", { childOf: req.span.context() })
+      : null;
+
+    // Начинаем транзакцию, чтобы заказ и товары сохранились атомарно
+    const t = await sequelize.transaction();
+
     try {
       const errors = validationResult(req);
       if (!errors.isEmpty()) {
+        await t.rollback();
         return res.status(400).json({ errors: errors.array() });
       }
 
       const userId = req.user.userId;
       const { items } = req.body;
+
+      // Считаем общую сумму
       const totalAmount = items.reduce(
         (sum, item) => sum + item.price * item.quantity,
-        0
+        0,
       );
 
-      const orderId = orderIdCounter++;
+      // 1. Сохраняем заказ в БД
+      const order = await Order.create(
+        {
+          userId,
+          totalAmount,
+          status: "pending",
+        },
+        { transaction: t },
+      );
 
+      // Подготавливаем товары
+      const itemsData = items.map((item) => ({
+        ...item,
+        OrderId: order.id,
+      }));
+
+      // Сохраняем товары
+      await OrderItem.bulkCreate(itemsData, { transaction: t });
+
+      // Фиксируем транзакцию (заказ сохранен в БД со статусом pending)
+      await t.commit();
+
+      req.logger.info("Order saved to DB", { orderId: order.id });
+
+      // 2. Отправляем событие в RabbitMQ (Saga)
+      const channel = getChannel();
       const payload = {
-        id: orderId,
+        id: order.id,
         userId,
+        totalAmount,
         items,
-        totalAmount: parseFloat(totalAmount.toFixed(2)),
-        createdAt: new Date().toISOString(),
       };
 
-      // 1. Сохраняем событие в Event Store
-      EventStore.save(orderId, "OrderCreated", payload);
-
-      // 2. Публикуем в Kafka (для аналитики)
-      await publishEvent("OrderCreated", payload);
-
-      // 3. Публикуем в RabbitMQ (для Саги - совместимость с прошлым шагом)
-      // В "чистой" архитектуре Saga тоже могла бы слушать Kafka, но мы оставим Rabbit
-      const channel = getChannel();
-      const sagaPayload = { ...payload, status: "pending" }; // Саге нужно поле status
       channel.publish(
         EXCHANGE_NAME,
         ORDER_CREATED_KEY,
-        Buffer.from(JSON.stringify(sagaPayload))
+        Buffer.from(JSON.stringify(payload)),
       );
 
-      console.log(`[Order] Order ${orderId} created (Event Sourced).`);
+      req.logger.info("Order published to MQ", { orderId: order.id });
+      // Analytics Service ждет событие с типом "OrderCreated"
+      await publishEvent("OrderCreated", payload);
+      req.logger.info("Order published to Kafka", { orderId: order.id });
 
-      res.status(202).json({
-        message: "Order accepted.",
-        order: EventStore.getOrderState(orderId), // Возвращаем восстановленное состояние
+      // Метрики
+      const duration = (Date.now() - startTime) / 1000;
+      orderProcessingDuration.observe(
+        { status: "created", service: "order-service" },
+        duration,
+      );
+      ordersTotal.inc({ status: "created", service: "order-service" });
+
+      res.status(201).json({
+        message: "Order created",
+        order: { id: order.id, status: "pending", totalAmount },
       });
+
+      span?.finish();
     } catch (error) {
+      // Если что-то пошло не так, откатываем транзакцию БД
+      if (t && !t.finished) await t.rollback();
+
+      req.logger.error("Order creation failed", { error: error.message });
       next(error);
     }
   }
 }
 
-// Обновленная функция компенсации (тоже через события)
-async function cancelOrder(orderId) {
-  const currentState = EventStore.getOrderState(orderId);
+// Компенсирующая транзакция (Saga Rollback)
+async function cancelOrder(orderId, tracer) {
+  const span = tracer ? tracer.startSpan("cancel-order") : null;
+  span?.setTag("order.id", orderId);
 
-  if (currentState && currentState.status === "pending") {
-    // 1. Сохраняем событие
-    EventStore.save(orderId, "OrderCancelled", { reason: "Payment Failed" });
+  try {
+    const order = await Order.findByPk(orderId);
 
-    // 2. Публикуем в Kafka
-    await publishEvent("OrderCancelled", {
-      id: orderId,
-      totalAmount: currentState.totalAmount,
-    });
+    if (order && order.status === "pending") {
+      order.status = "cancelled";
+      await order.save();
 
-    console.log(
-      `[Order] SAGA COMPENSATION: Order ${orderId} cancelled via Event Sourcing.`
-    );
+      console.log(
+        `[Order] SAGA COMPENSATION: Order ${orderId} cancelled in DB.`,
+      );
+      ordersTotal.inc({ status: "cancelled", service: "order-service" });
+    }
+  } catch (err) {
+    console.error(`[Order] Failed to cancel order ${orderId}`, err);
+  } finally {
+    span?.finish();
   }
 }
 

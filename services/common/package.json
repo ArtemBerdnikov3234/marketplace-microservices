@@ -1,0 +1,12 @@
+{
+  "name": "@marketplace/common",
+  "version": "1.0.0",
+  "description": "Common observability libraries",
+  "main": "observability.js",
+  "dependencies": {
+    "prom-client": "^15.1.0",
+    "jaeger-client": "^3.19.0",
+    "winston": "^3.11.0",
+    "opentracing": "^0.14.7"
+  }
+}

@@ -1,11 +1,45 @@
-# --- Файл: docker-compose.yml (ПОЛНАЯ И ПРАВИЛЬНАЯ ВЕРСИЯ ДЛЯ SAGA) ---
+version: "3.8"
+
 services:
+  # ==================== DATABASES (NEW) ====================
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: root
+      # Базы данных auth_db, order_db, payment_db создадутся скриптом из папки infrastructure
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infrastructure/postgres-init:/docker-entrypoint-initdb.d
+    networks: [marketplace-net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mongo:
+    image: mongo:6.0
+    container_name: mongo
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: root
+    volumes:
+      - mongo-data:/data/db
+    networks: [marketplace-net]
+
+  # ==================== INFRASTRUCTURE ====================
   rabbitmq:
     image: rabbitmq:3-management
     container_name: rabbitmq
     ports:
-      - "5672:5672" # Порт для обмена сообщениями
-      - "15672:15672" # Веб-интерфейс для управления
+      - "5672:5672"
+      - "15672:15672"
     networks: [marketplace-net]
     healthcheck:
       test: ["CMD", "rabbitmqctl", "status"]
@@ -13,8 +47,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # Consul можно закомментировать или удалить, если он не используется auth-service
-  # Но оставим его, так как auth-service на него завязан
   consul:
     image: consul:1.15
     container_name: consul
@@ -27,24 +59,6 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
-
-  # Сервис аутентификации остается без изменений, он нужен для получения токена
-  auth-service-1:
-    build: ./services/auth-service
-    container_name: auth-service-1
-    ports: ["8081:3001"]
-    volumes: ["./docs:/usr/src/app/docs:ro"]
-    environment:
-      - PORT=3001
-      - JWT_SECRET=super-secret-jwt-key-change-in-production
-      - JWT_EXPIRES_IN=24h
-      - CONSUL_HOST=consul
-      - CONSUL_PORT=8500
-      - SERVICE_HOST=auth-service-1
-    depends_on:
-      consul: { condition: service_healthy }
-    networks: [marketplace-net]
-    restart: unless-stopped
 
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.0
@@ -79,9 +93,97 @@ services:
       timeout: 5s
       retries: 5
 
-  # Order Service теперь зависит от RabbitMQ
+  # ==================== MICROSERVICES ====================
+  auth-service-1:
+    build:
+      context: .
+      dockerfile: ./services/auth-service/Dockerfile
+    container_name: auth-service-1
+    ports: ["8081:3001"]
+    volumes: ["./docs:/usr/src/app/docs:ro"]
+    environment:
+      - PORT=3001
+      - JWT_SECRET=super-secret-jwt-key-change-in-production
+      - JWT_EXPIRES_IN=24h
+      - CONSUL_HOST=consul
+      - CONSUL_PORT=8500
+      - SERVICE_HOST=auth-service-1
+      - JAEGER_AGENT_HOST=jaeger
+      - JAEGER_AGENT_PORT=6831
+      # DB Config (PostgreSQL)
+      - DB_HOST=postgres
+      - DB_USER=admin
+      - DB_PASS=root
+      - DB_NAME=auth_db
+    depends_on:
+      consul:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    networks: [marketplace-net]
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:3001/health",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  catalog-service-1:
+    build:
+      context: .
+      dockerfile: ./services/catalog-service/Dockerfile
+    container_name: catalog-service-1
+    ports: ["8082:3002"]
+    volumes: ["./docs:/usr/src/app/docs:ro"]
+    environment:
+      - PORT=3002
+      - JWT_SECRET=super-secret-jwt-key-change-in-production
+      - CONSUL_HOST=consul
+      - CONSUL_PORT=8500
+      - SERVICE_HOST=catalog-service-1
+      - JAEGER_AGENT_HOST=jaeger
+      - JAEGER_AGENT_PORT=6831
+      # DB Config (MongoDB)
+      - MONGO_URI=mongodb://admin:root@mongo:27017/catalog_db?authSource=admin
+    depends_on:
+      consul:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+      mongo:
+        condition: service_started
+    networks: [marketplace-net]
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:3002/health",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   order-service-1:
-    build: ./services/order-service
+    build:
+      context: .
+      dockerfile: ./services/order-service/Dockerfile
     container_name: order-service-1
     ports: ["8083:3003"]
     environment:
@@ -89,63 +191,246 @@ services:
       - JWT_SECRET=super-secret-jwt-key-change-in-production
       - RABBITMQ_URL=amqp://rabbitmq
       - PAYMENT_SERVICE_GRPC=payment-service:50051
-      - KAFKA_BROKER=kafka:29092 # <-- Адрес Kafka внутри сети
+      - KAFKA_BROKER=kafka:29092
+      - JAEGER_AGENT_HOST=jaeger
+      - JAEGER_AGENT_PORT=6831
+      # DB Config (PostgreSQL)
+      - DB_HOST=postgres
+      - DB_USER=admin
+      - DB_PASS=root
+      - DB_NAME=order_db
     depends_on:
-      rabbitmq: { condition: service_healthy }
-      kafka: { condition: service_healthy }
+      rabbitmq:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     networks: [marketplace-net]
     restart: unless-stopped
 
   analytics-service:
-    build: ./services/analytics-service
+    build:
+      context: .
+      dockerfile: ./services/analytics-service/Dockerfile
     container_name: analytics-service
     ports: ["3004:3004"]
     environment:
       - PORT=3004
       - KAFKA_BROKER=kafka:29092
+      - JAEGER_AGENT_HOST=jaeger
+      - JAEGER_AGENT_PORT=6831
+      # DB Config (MongoDB)
+      - MONGO_URI=mongodb://admin:root@mongo:27017/analytics_db?authSource=admin
     depends_on:
-      kafka: { condition: service_healthy }
+      kafka:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+      mongo:
+        condition: service_started
     networks: [marketplace-net]
     restart: unless-stopped
 
-  # Cервис для обработки платежей
   payment-service:
-    build: ./services/payment-service
+    build:
+      context: .
+      dockerfile: ./services/payment-service/Dockerfile
     container_name: payment-service
     environment:
       - RABBITMQ_URL=amqp://rabbitmq
       - GRPC_PORT=50051
-    ports:
-      # Экспонируем порт, если захотим тестировать локально (опционально)
-      - "50051:50051"
+      - JAEGER_AGENT_HOST=jaeger
+      - JAEGER_AGENT_PORT=6831
+      # DB Config (PostgreSQL)
+      - DB_HOST=postgres
+      - DB_USER=admin
+      - DB_PASS=root
+      - DB_NAME=payment_db
+    ports: ["50051:50051"]
     depends_on:
-      rabbitmq: { condition: service_healthy }
+      rabbitmq:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     networks: [marketplace-net]
     restart: unless-stopped
 
-  # Новый сервис для отправки уведомлений
   notification-service:
-    build: ./services/notification-service
+    build:
+      context: .
+      dockerfile: ./services/notification-service/Dockerfile
     container_name: notification-service
     environment:
       - RABBITMQ_URL=amqp://rabbitmq
+      - JAEGER_AGENT_HOST=jaeger
+      - JAEGER_AGENT_PORT=6831
     depends_on:
-      rabbitmq: { condition: service_healthy }
+      rabbitmq:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
     networks: [marketplace-net]
     restart: unless-stopped
 
-  # NGINX теперь проксирует запросы только на нужные нам сервисы
   nginx-gateway:
     image: nginx:alpine
     container_name: nginx-gateway
-    volumes: ["./gateway/nginx.conf:/etc/nginx/conf.d/default.conf:ro"]
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/nginx.conf:ro
     ports: ["8080:8080"]
     depends_on:
-      - auth-service-1
-      - order-service-1
+      auth-service-1:
+        condition: service_healthy
+      catalog-service-1:
+        condition: service_healthy
+      order-service-1:
+        condition: service_started
     networks: [marketplace-net]
     restart: unless-stopped
+
+  graphql-gateway:
+    build:
+      context: .
+      dockerfile: ./gateway/graphql-gateway/Dockerfile
+    container_name: graphql-gateway
+    ports:
+      - "4000:4000"
+    environment:
+      # Важно: используем имена контейнеров, а не localhost, так как мы внутри сети докера
+      - ORDER_SERVICE_URL=http://order-service-1:3003
+      - CATALOG_SERVICE_URL=http://catalog-service-1:3002
+    depends_on:
+      - order-service-1
+      - catalog-service-1
+    networks:
+      - marketplace-net
+    restart: unless-stopped
+  # ==================== OBSERVABILITY ====================
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports: ["9090:9090"]
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+    networks: [marketplace-net]
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports: ["3000:3000"]
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+    depends_on:
+      - prometheus
+      - loki
+    networks: [marketplace-net]
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:latest
+    container_name: loki
+    user: "0" # Запуск от root
+    ports: ["3100:3100"]
+    # volumes убраны для стабильности
+    command: -config.file=/etc/loki/local-config.yaml
+    networks: [marketplace-net]
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:latest
+    user: root
+    container_name: promtail
+    volumes:
+      - ./monitoring/promtail/promtail-config.yml:/etc/promtail/config.yml
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+    networks: [marketplace-net]
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: jaeger
+    ports:
+      - "5775:5775/udp"
+      - "6831:6831/udp"
+      - "6832:6832/udp"
+      - "5778:5778"
+      - "16686:16686"
+      - "14268:14268"
+      - "14250:14250"
+      - "9411:9411"
+    environment:
+      - COLLECTOR_ZIPKIN_HOST_PORT=:9411
+      - COLLECTOR_OTLP_ENABLED=true
+    networks: [marketplace-net]
+    restart: unless-stopped
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    ports: ["9100:9100"]
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    networks: [marketplace-net]
+    restart: unless-stopped
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
+    ports: ["8084:8080"]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    networks: [marketplace-net]
+    restart: unless-stopped
+
+  k6-load-test:
+    image: grafana/k6:latest
+    container_name: k6-load-test
+    volumes:
+      - ./tests:/tests
+    environment:
+      - K6_OUT=json=/tests/test-results.json
+    command: run /tests/load_test.js
+    networks: [marketplace-net]
+    profiles: ["tools"]
 
 networks:
   marketplace-net:
     driver: bridge
+
+volumes:
+  prometheus-data:
+  grafana-data:
+  loki-data:
+  # Новые volumes для баз данных
+  postgres-data:
+  mongo-data:

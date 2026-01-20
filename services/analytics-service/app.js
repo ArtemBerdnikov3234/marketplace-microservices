@@ -1,12 +1,29 @@
 const express = require("express");
 const { Kafka } = require("kafkajs");
+const connectDB = require("./config/db"); // Подключение БД
+const AnalyticsEvent = require("./models/event.model"); // Модель
+
 require("dotenv").config();
+
+// OBSERVABILITY
+const {
+  register,
+  createLogger,
+  initJaegerTracer,
+  metricsMiddleware,
+  tracingMiddleware,
+  loggingMiddleware,
+} = require("../common/observability");
 
 const app = express();
 const PORT = process.env.PORT || 3004;
 const KAFKA_BROKER = process.env.KAFKA_BROKER || "localhost:9092";
+const SERVICE_NAME = "analytics-service";
 
-// Внутреннее хранилище статистики (Read Model)
+const logger = createLogger(SERVICE_NAME);
+const tracer = initJaegerTracer(SERVICE_NAME);
+
+// Stats storage (оставляем в памяти для быстрого API, но историю пишем в БД)
 const stats = {
   totalOrders: 0,
   totalRevenue: 0,
@@ -16,7 +33,7 @@ const stats = {
 
 // Kafka Consumer
 const kafka = new Kafka({
-  clientId: "analytics-service",
+  clientId: SERVICE_NAME,
   brokers: [KAFKA_BROKER],
 });
 const consumer = kafka.consumer({ groupId: "analytics-group" });
@@ -27,14 +44,26 @@ async function startConsumer() {
 
   await consumer.run({
     eachMessage: async ({ message }) => {
-      const event = JSON.parse(message.value.toString());
-      console.log(`[Analytics] Received event: ${event.type}`);
+      const eventStr = message.value.toString();
+      const event = JSON.parse(eventStr);
+
+      logger.info("Kafka event received", { type: event.type });
+
+      // Сохраняем в MongoDB
+      try {
+        await AnalyticsEvent.create({
+          eventType: event.type,
+          payload: event.payload,
+        });
+      } catch (err) {
+        logger.error("Failed to save event to DB", { error: err.message });
+      }
+
       processEvent(event);
     },
   });
 }
 
-// Проекция событий в статистику (CQRS: Projector)
 function processEvent(event) {
   const { type, payload } = event;
 
@@ -50,21 +79,40 @@ function processEvent(event) {
     });
   } else if (type === "OrderCancelled") {
     stats.cancelledOrders++;
-    // Можно вычитать выручку, если нужно
-    // stats.totalRevenue -= payload.totalAmount;
   }
 }
+
+// Middleware
+app.use(metricsMiddleware(SERVICE_NAME));
+app.use(tracingMiddleware(tracer, SERVICE_NAME));
+app.use(loggingMiddleware(logger));
+
+app.get("/metrics", async (req, res) => {
+  res.set("Content-Type", register.contentType);
+  res.end(await register.metrics());
+});
 
 app.get("/api/analytics", (req, res) => {
   res.json(stats);
 });
 
-app.listen(PORT, async () => {
-  console.log(`Analytics Service running on port ${PORT}`);
+// Запуск сервера
+const server = app.listen(PORT, async () => {
+  logger.info(`Analytics Service running on port ${PORT}`);
+
+  // Подключение к БД
+  await connectDB();
+  logger.info("Connected to MongoDB");
+
   try {
     await startConsumer();
-    console.log("Kafka Consumer connected.");
+    logger.info("Kafka Consumer connected");
   } catch (err) {
-    console.error("Error connecting to Kafka:", err);
+    logger.error("Kafka connection error", { error: err.message });
   }
+});
+
+process.on("SIGTERM", async () => {
+  await tracer.close();
+  process.exit(0);
 });

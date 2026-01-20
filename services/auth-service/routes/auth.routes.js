@@ -1,8 +1,7 @@
-// services/auth-service/routes/auth.routes.js
 const express = require("express");
 const { body } = require("express-validator");
 const authController = require("../controllers/auth.controller.js");
-const { verifyToken } = require("../middleware/auth.middleware.js");
+const { verifyToken, adminOnly } = require("../middleware/auth.middleware.js");
 
 const router = express.Router();
 
@@ -28,5 +27,13 @@ router.post(
 );
 
 router.get("/profile", verifyToken, authController.getProfile);
+
+router.get("/users", verifyToken, adminOnly, authController.getAllUsers);
+router.patch(
+  "/users/:userId/role",
+  verifyToken,
+  adminOnly,
+  authController.updateUserRole
+);
 
 module.exports = router;

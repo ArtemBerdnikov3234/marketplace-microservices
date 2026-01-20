@@ -10,12 +10,14 @@ router.use(verifyToken);
 
 router.get("/", wishlistController.getWishlist);
 
-router.post("/", [body("productId").isInt()], wishlistController.addToWishlist);
-
-router.delete(
-  "/:productId",
-  [param("productId").isInt()],
-  wishlistController.removeFromWishlist
+// Убрали .isInt()
+router.post(
+  "/",
+  [body("productId").notEmpty()],
+  wishlistController.addToWishlist,
 );
+
+// Убрали .isInt()
+router.delete("/:productId", wishlistController.removeFromWishlist);
 
 module.exports = router;
